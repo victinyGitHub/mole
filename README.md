@@ -1,166 +1,91 @@
 # 🕳 mole
 
-**Dig holes. Fill code. Grow programs.**
+**Write code with holes. Let AI fill them in.**
 
-Mole is a human-centred assisted programming tool. You write code with `hole()` placeholders where you don't know the implementation yet. Mole helps you:
-
-- **Expand** holes into smaller sub-problems with structural code
-- **Diversify** — explore 3 different approaches side-by-side
-- **Fill** leaf-level holes with LLM-generated, type-verified code
-
-You steer every decision. Mole assists, never decides.
-
-## Prerequisites
-
-- **Python 3.10+**
-- **[Claude CLI](https://docs.anthropic.com/en/docs/claude-code/overview)** — mole uses Claude as its LLM backend
+Mole is a CLI tool for writing programs incrementally. Instead of asking an AI to write everything at once, you write the structure yourself and leave `hole()` placeholders where you want generated code. You stay in control of every decision.
 
 ## Install
 
-```bash
-pip install mole-code
-```
-
-Or from source:
+You need **Python 3.10+** and **[Claude CLI](https://docs.anthropic.com/en/docs/claude-code/overview)** (handles auth for you).
 
 ```bash
-git clone https://github.com/xidequest/mole.git
+# from github
+git clone https://github.com/victinyGitHub/mole.git
 cd mole
-pip install -e .
+pip install -e ".[pretty]"
 ```
 
-For the pretty terminal UI (recommended):
+Verify it works:
 
 ```bash
-pip install mole-code[pretty]
+mole --check examples/test_projects/fizzbuzz.py
 ```
 
-## Quick Start
+You should see 2 holes detected with their types.
 
-### 1. Write a seed file with holes
+## How it works
+
+**1. Write a file with holes:**
 
 ```python
-# my_tool.py
+# search.py
 from mole import hole
 
-def fetch_pages(urls: list[str]) -> list[dict]:
-    """Fetch and parse multiple web pages."""
-    pages: list[dict] = hole("fetch each URL, parse HTML, return list of {url, title, text}")
-    return pages
-
-def build_index(pages: list[dict]) -> dict[str, list[str]]:
-    """Build an inverted search index from pages."""
-    index: dict[str, list[str]] = hole("tokenize each page's text, build word -> [url] mapping")
-    return index
+def search(pages: list[dict], query: str) -> list[str]:
+    """Find pages matching a search query."""
+    results: list[str] = hole("search pages for query, return matching URLs")
+    return results
 ```
 
-### 2. Open the REPL
+The type annotation (`list[str]`) tells mole what the generated code needs to return. The string inside `hole()` describes what you want.
+
+**2. Open it in mole:**
 
 ```bash
-mole my_tool.py
+mole search.py
 ```
 
-```
-  🕳 mole
-  dig holes · fill code · grow programs
+**3. Use the REPL to work with your holes:**
 
-  my_tool.py — 2 hole(s)
+| Command | What it does |
+|---------|-------------|
+| `show 1` | See hole details and context |
+| `fill 1` | Generate code for hole 1 (type-checked automatically) |
+| `expand 1` | Break a big hole into smaller sub-holes |
+| `diversify 1` | See 3 different approaches side-by-side |
+| `edit 1` | Change the hole description |
+| `apply` | Write all generated code back to your file |
+| `undo` | Revert last fill/expand |
+| `config model opus` | Switch to a different Claude model |
 
-  [1] L6  ○ unfilled  pages: list[dict]
-      "fetch each URL, parse HTML, return list of {url, title, text}"
+That's the core loop: **write holes → fill/expand → review → apply**.
 
-  [2] L11  ○ unfilled  index: dict[str, list[str]]
-      "tokenize each page's text, build word -> [url] mapping"
+## Tips
 
-  Commands: show · expand · diversify · fill · edit · propagate · groups · context · verify · apply · undo · reload · quit
-```
+- **Type annotations matter.** `results: list[str] = hole(...)` gives much better fills than just `hole(...)` with no type hint. The type is what mole uses to verify the generated code is correct.
 
-### 3. Work with holes
+- **Expand before fill** for complex holes. If a hole is doing too many things, `expand` breaks it into structural code + smaller sub-holes that are easier to fill individually.
 
-```
-mole> expand 1          # decompose into sub-holes
-mole> diversify 1       # see 3 different approaches side-by-side
-mole> fill 1            # generate code with type checking
-mole> show 1            # inspect a hole's details
-mole> context 1         # see what context the LLM receives
-mole> config model opus # switch to opus mid-session
-mole> apply             # write all fills back to file
-```
+- **Diversify when you're unsure.** `diversify 1` shows 3 different approaches streaming side-by-side so you can pick the one you like.
 
-## How It Works
+- **Behavioral specs** give extra guidance:
+  ```python
+  # @mole:behavior use binary search, not linear scan
+  # @mole:ensures returns -1 if not found
+  index: int = hole("find the target value")
+  ```
 
-```
-                    ┌──────────┐
-  seed file ──────▶ │ discover │ ← tree-sitter finds hole() calls
-  with holes        └────┬─────┘
-                         │
-                    ┌────▼─────┐
-                    │ expand   │ ← decompose into structural code + sub-holes
-                    └────┬─────┘
-                         │
-                    ┌────▼─────┐
-                    │ fill     │ ← LLM generates code for each hole
-                    └────┬─────┘
-                         │
-                    ┌────▼─────┐
-                    │ verify   │ ← type checker confirms correctness
-                    └────┬─────┘
-                         │
-                    ┌────▼─────┐
-                    │ apply    │ ← write verified code back to file
-                    └──────────┘
-```
-
-**Three-tier type extraction:**
-1. Tree-sitter reads type annotations directly from your code (instant)
-2. Sentinel trick infers types from the type checker for unannotated holes
-
-**Composable context layers:**
-- **Types** — annotations, imported types, scope variables
-- **Symbols** — function signatures ranked by type compatibility
-- **Behavior** — `@mole:behavior`, `@mole:requires`, `@mole:ensures` specs
-- **Code** — enclosing block, indentation style
-
-## Behavioral Specs
-
-Add structured specs above holes to guide generation:
-
-```python
-# @mole:behavior merge-sort with early termination for sorted runs
-# @mole:requires input list has comparable elements
-# @mole:ensures output is sorted and same length as input
-sorted_items: list[int] = hole("sort the items efficiently")
-```
-
-## Batch Mode
+## Batch mode
 
 ```bash
-mole --check my_tool.py         # show holes (no LLM calls)
-mole --fill-all my_tool.py      # fill all holes
-mole --expand-all my_tool.py    # expand all holes
-mole --model opus my_tool.py    # use opus in REPL
+mole --check file.py       # just show holes, no LLM calls
+mole --fill-all file.py    # fill everything in one shot
+mole --model opus file.py  # open REPL with opus
 ```
 
-## Configuration
+## Languages
 
-In the REPL, use `config` to adjust settings on the fly:
-
-```
-mole> config                    # show current settings
-mole> config model opus         # switch to opus
-mole> config effort high        # extended thinking
-mole> config streaming off      # disable streaming
-mole> config temperature 0.5    # more creative
-```
-
-## Language Support
-
-Mole uses tree-sitter for all languages. Full support (type checking + extraction):
-
-- **Python** (pyright)
-- **TypeScript/JavaScript** (tsc)
-
-Tree-sitter parsing (hole detection, code structure) works for any language with a tree-sitter grammar.
+Works best with **Python** and **TypeScript** (full type checking). Hole detection works for any language with a tree-sitter grammar.
 
 ## License
 
