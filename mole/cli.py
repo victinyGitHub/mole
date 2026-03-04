@@ -397,26 +397,50 @@ def _repl(dfile: MoleFile, filler_name: str, layers: list, config: FillerConfig)
 
         elif cmd == "config":
             if not arg:
-                # Show current config
+                # Show current config with valid options
+                _valid_options = {
+                    "model": ", ".join(_VALID_MODELS),
+                    "effort": ", ".join(_VALID_EFFORTS),
+                    "temperature": "0.0 - 1.0",
+                    "max_tokens": "integer",
+                    "timeout": "seconds",
+                    "streaming": "on/off",
+                }
                 if HAS_RICH and console:
                     from .display import COLORS
                     from rich.table import Table
-                    table = Table(show_header=False, box=None, padding=(0, 2))
-                    table.add_column(style=COLORS["dim"])
-                    table.add_column(style=COLORS["primary"])
+                    table = Table(show_header=True, box=None, padding=(0, 2))
+                    table.add_column("setting", style=COLORS["dim"])
+                    table.add_column("value", style=COLORS["primary"])
+                    table.add_column("options", style=COLORS["dim"])
                     for field in _CONFIG_FIELDS:
                         val = getattr(config, field)
-                        table.add_row(field, str(val))
-                    console.print("  Current config:")
+                        opts = _valid_options.get(field, "")
+                        table.add_row(field, str(val), opts)
                     console.print(table)
                 else:
-                    print("  Current config:")
+                    print("  Config:")
                     for field in _CONFIG_FIELDS:
-                        print(f"    {field}: {getattr(config, field)}")
+                        val = getattr(config, field)
+                        opts = _valid_options.get(field, "")
+                        print(f"    {field}: {val}  ({opts})")
+                print()
+                print_info("Usage: config <key> <value>")
             else:
                 cfg_parts = arg.split(None, 1)
                 if len(cfg_parts) < 2:
-                    print_info("Usage: config <key> <value>  |  config (show all)")
+                    # Show specific key's current value + valid options
+                    key = cfg_parts[0].lower()
+                    if key not in _CONFIG_FIELDS:
+                        print_error(f"Unknown config key: {key}. Valid: {', '.join(_CONFIG_FIELDS)}")
+                    elif key == "model":
+                        print_info(f"model: {getattr(config, 'model')}  (valid: {', '.join(_VALID_MODELS)})")
+                    elif key == "effort":
+                        print_info(f"effort: {getattr(config, 'effort')}  (valid: {', '.join(_VALID_EFFORTS)})")
+                    elif key == "streaming":
+                        print_info(f"streaming: {getattr(config, 'streaming')}  (valid: on/off, true/false)")
+                    else:
+                        print_info(f"{key}: {getattr(config, key)}")
                 else:
                     key, val_str = cfg_parts[0].lower(), cfg_parts[1]
                     if key not in _CONFIG_FIELDS:
