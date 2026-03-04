@@ -1,0 +1,11 @@
+{
+  "name": "mole",
+  "description": "Typed-hole-driven code generation — write code with hole() placeholders, expand into sub-problems, fill with type-verified LLM code",
+  "version": "0.1.0",
+  "author": {
+    "name": "xi"
+  },
+  "homepage": "https://github.com/victinyGitHub/mole",
+  "repository": "https://github.com/victinyGitHub/mole",
+  "license": "MIT"
+}

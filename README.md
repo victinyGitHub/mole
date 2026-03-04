@@ -9,7 +9,12 @@ Mole is a CLI tool for writing programs incrementally. Instead of asking an AI t
 You need **Python 3.10+** and **[Claude CLI](https://docs.anthropic.com/en/docs/claude-code/overview)** (handles auth for you).
 
 ```bash
-# from github
+pip install "mole-code[pretty] @ git+https://github.com/victinyGitHub/mole.git"
+```
+
+Or clone and install locally:
+
+```bash
 git clone https://github.com/victinyGitHub/mole.git
 cd mole
 pip install -e ".[pretty]"
@@ -22,6 +27,16 @@ mole --check examples/test_projects/fizzbuzz.py
 ```
 
 You should see 2 holes detected with their types.
+
+### Claude Code plugin
+
+If you use [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview), install mole as a plugin to teach Claude how to use it:
+
+```bash
+claude plugin add github:victinyGitHub/mole
+```
+
+Then run `/mole:setup` to install the CLI, or `/mole:mole` for usage reference.
 
 ## How it works
 

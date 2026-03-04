@@ -10,7 +10,7 @@ build/
 .venv/
 venv/
 .env
-# Claude Code local state (sessions, etc)
+# Claude Code local state (sessions, etc) — keep skills for plugin
 .claude/*
-# But keep skills and CLAUDE.md for distribution
 !.claude/skills/
+!.claude-plugin/
