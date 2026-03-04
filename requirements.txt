@@ -1,0 +1,5 @@
+# Core
+tree-sitter-languages>=1.10
+
+# Pretty terminal UI (optional but recommended)
+rich>=13.0
