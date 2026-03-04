@@ -43,6 +43,7 @@ from .cache import (
     CacheManager, cache_key, context_hash, source_hash,
     get_cache, _serialize_expansion, _deserialize_expansion,
 )
+from .trialogue import trialogue_fill
 
 
 # ─── discover ─────────────────────────────────────────────────────────────────
@@ -424,49 +425,25 @@ def fill(
         behavior_constraint=behavior_text,
     )
 
-    # Fill-verify-retry loop
-    best_code = ""
-    best_result = VerifyResult(success=False)
-    errors_feedback = ""
-
-    for attempt in range(max_retries):
-        # Append error feedback on retries
-        current_prompt = prompt
-        if errors_feedback:
-            current_prompt += (
-                f"\n\nPREVIOUS ATTEMPT FAILED with these type errors:\n"
-                f"{errors_feedback}\n"
-                f"Fix these errors. Return ONLY the corrected code."
-            )
-
-        # Call filler (stream only on first attempt — retries are corrections)
-        if attempt == 0 and on_chunk:
-            raw_code = filler.fill(current_prompt, on_chunk=on_chunk)
-        else:
-            raw_code = filler.fill(current_prompt)
-        raw_code = _strip_reasoning_leaks(raw_code)
-
-        # Extract #import: lines so they can be hoisted for verification
-        clean_code, new_imports = _extract_fill_imports(raw_code)
-
-        # Verify with import-aware substitution:
-        # 1. Substitute fill into source FIRST (at correct line_no)
-        # 2. THEN hoist imports (so line shift doesn't affect substitution)
-        # extra_imports allows batch fills to include imports from previous fills
+    # Build verify function that handles import extraction + substitution
+    def _verify_fill(raw_code: str) -> VerifyResult:
+        """Verify a fill attempt — extracts imports, substitutes, type-checks."""
+        cleaned = _strip_reasoning_leaks(raw_code)
+        clean_code, new_imports = _extract_fill_imports(cleaned)
         all_verify_imports = new_imports + list(extra_imports or [])
-        result = _verify_with_imports(
+        return _verify_with_imports(
             hole_target, clean_code, all_verify_imports, source, path, backend
         )
 
-        if result.success or len(result.new_errors) < len(best_result.new_errors) or not best_code:
-            best_code = raw_code
-            best_result = result
-
-        if result.success:
-            break  # Clean — no new type errors
-
-        # Build error feedback for next retry
-        errors_feedback = "\n".join(result.new_errors[:5])  # Cap at 5 errors
+    # Trialogue fill-verify loop (structured error correction, max 2 rounds)
+    best_code, best_result, _state = trialogue_fill(
+        hole_target=hole_target,
+        initial_prompt=prompt,
+        filler=filler,
+        verify_fn=_verify_fill,
+        max_corrections=max(max_retries - 1, 1),  # retries → correction rounds
+        on_chunk=on_chunk,
+    )
 
     # Update hole status
     hole_target.fill_code = best_code

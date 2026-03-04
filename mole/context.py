@@ -7,11 +7,12 @@ and formats it as a prompt fragment. Layers are independently toggleable.
 The filler sees ONLY the assembled prompt string. It knows nothing about
 holes, types, or context. This is the separation of concerns.
 
-4 layers:
+5 layers:
   1. Types    — type annotations, imported types, scope variables
   2. Symbols  — function signatures, constants
   3. Behavior — @mole: behavioral specs
   4. Code     — enclosing block, sibling holes, indent style
+  5. Examples — same-file few-shot examples (CoqPilot: 34% → 51%)
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ from typing import Optional
 
 from .types import Hole, FunctionHeader, ContextLayer
 from .backends import LanguageBackend, get_backend, detect_language
+from .few_shot import FewShotContextLayer
 
 
 # ─── Type Compatibility Scoring ───────────────────────────────────────────────
@@ -710,6 +712,7 @@ DEFAULT_LAYERS = [
     SymbolContextLayer(),
     BehaviorContextLayer(),
     CodeContextLayer(),
+    FewShotContextLayer(),
 ]
 
 
