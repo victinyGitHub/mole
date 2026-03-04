@@ -93,6 +93,21 @@ class ClaudeCLIFiller:
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "LANG": os.environ.get("LANG", "en_US.UTF-8"),
         }
+        self._supports_no_session = self._check_flag_support()
+
+    def _check_flag_support(self) -> bool:
+        """Check if claude CLI supports --no-session-persistence."""
+        try:
+            proc = subprocess.run(
+                [self.CLAUDE_BIN, "--help"],
+                env=self.CLEAN_ENV,
+                capture_output=True, text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=10,
+            )
+            return "--no-session-persistence" in proc.stdout
+        except Exception:
+            return False
 
     def fill(self, prompt: str, on_chunk: Optional[callable] = None) -> str:
         """Send prompt to Claude CLI, return cleaned code output.
@@ -134,8 +149,9 @@ class ClaudeCLIFiller:
             "--output-format", "stream-json",
             "--verbose",
             "--include-partial-messages",
-            "--no-session-persistence",
         ]
+        if self._supports_no_session:
+            cmd.append("--no-session-persistence")
         if self.config.effort != "default":
             cmd.extend(["--effort", self.config.effort])
 
@@ -279,8 +295,9 @@ class ClaudeCLIFiller:
             self.CLAUDE_BIN, "-p", prompt,
             "--model", self.config.model,
             "--output-format", "text",
-            "--no-session-persistence",
         ]
+        if self._supports_no_session:
+            cmd.append("--no-session-persistence")
         if self.config.effort != "default":
             cmd.extend(["--effort", self.config.effort])
 
