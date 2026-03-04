@@ -1,6 +1,6 @@
 """mole — CLI interface.
 
-Interactive REPL and batch modes for hole-driven development.
+Interactive REPL, batch modes, and MCP server for hole-driven development.
 
 Usage:
     mole myfile.py                          # Interactive REPL
@@ -8,10 +8,10 @@ Usage:
     mole --fill-all myfile.py               # Fill all unfilled holes
     mole --expand-all myfile.py             # Expand all unfilled holes
     mole --prefetch myfile.py               # Pre-warm cache with diversify results
-    mole --cache-status myfile.py           # Show cache status
     mole --no-cache --fill-all myfile.py    # Bypass cache
     mole --model opus myfile.py             # Use opus model
     mole --layers types,behavior f.py       # Selective context layers
+    mole --mcp                              # Start MCP server for Claude Code
 """
 from __future__ import annotations
 
@@ -732,7 +732,10 @@ def main(argv: Optional[list[str]] = None) -> None:
         prog="mole",
         description="Human-centred assisted programming with typed holes",
     )
-    parser.add_argument("file", type=Path, help="Source file to work on")
+    parser.add_argument("file", type=Path, nargs="?", default=None, help="Source file to work on")
+
+    # MCP server mode
+    parser.add_argument("--mcp", action="store_true", help="Start MCP server over stdio (for Claude Code integration)")
 
     # Batch modes
     parser.add_argument("--check", action="store_true", help="Show holes (no LLM calls)")
@@ -765,6 +768,15 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("--no-cache", action="store_true", help="Bypass caching")
 
     args = parser.parse_args(argv)
+
+    # MCP server mode — doesn't need a file
+    if args.mcp:
+        from .mcp_server import run_mcp
+        run_mcp(filler_name=args.filler, model=args.model)
+        return
+
+    if args.file is None:
+        parser.error("a source file is required (unless using --mcp)")
 
     if not args.file.exists():
         print_error(f"File not found: {args.file}")
