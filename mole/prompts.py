@@ -50,6 +50,13 @@ HOLES_TYPED = (
     "  Do NOT write `_: None = hole(...)` — just write `hole(...)` on its own line."
 )
 
+# Decomposition granularity — prevent monolithic expansions
+DECOMPOSE_GRANULARITY = (
+    "- If your expanded code would exceed ~50 lines, decompose further into smaller sub-holes.\n"
+    "- Each sub-hole should be independently fillable in under 20 lines.\n"
+    "- Prefer 3-5 focused sub-holes over a single large code block."
+)
+
 # Behavioral annotations
 HOLES_BEHAVIOR = "- Add `{comment_prefix} @mole:behavior ...` comment above each sub-hole."
 HOLES_APPROACH = "- Name your approach on the FIRST LINE as a comment: `{comment_prefix} approach: <name>`"
@@ -72,7 +79,8 @@ APPROACH 2: <name>
 
 ...
 
-Make approaches genuinely different in structure, not just wording."""
+Make approaches genuinely different in structure, not just wording.
+Prefer approaches that decompose into 3-5 focused sub-tasks over monolithic implementations."""
 
 
 # ─── Composed Templates ──────────────────────────────────────────────────────
@@ -108,6 +116,7 @@ RULES:
 - Write real, runnable code that decomposes the task into sub-tasks.
 - For each sub-task, use `hole("description of sub-task")` as a placeholder.
 {HOLES_TYPED}
+{DECOMPOSE_GRANULARITY}
 {HOLES_BEHAVIOR}
 {HOLES_APPROACH}
 {{valid_code}}

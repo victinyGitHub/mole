@@ -15,7 +15,10 @@ holes, types, or context. This is the separation of concerns.
 """
 from __future__ import annotations
 
+import importlib.util
 import re
+import sys
+import sysconfig
 from pathlib import Path
 from typing import Optional
 
@@ -97,6 +100,124 @@ def _type_compat_score(candidate_type: str, expected_type: str) -> int:
         return 1
 
     return 0
+
+
+# ─── Cross-File Type Resolution Helpers ──────────────────────────────────────
+
+# Cache stdlib paths for fast lookup
+_STDLIB_PATHS: list[str] | None = None
+
+
+def _get_stdlib_paths() -> list[str]:
+    """Get all stdlib and site-packages root paths for _is_stdlib_path checks."""
+    global _STDLIB_PATHS
+    if _STDLIB_PATHS is None:
+        paths = []
+        # stdlib directory
+        stdlib = sysconfig.get_path("stdlib")
+        if stdlib:
+            paths.append(str(Path(stdlib).resolve()))
+        # purelib (site-packages)
+        purelib = sysconfig.get_path("purelib")
+        if purelib:
+            paths.append(str(Path(purelib).resolve()))
+        # platlib (platform-specific site-packages)
+        platlib = sysconfig.get_path("platlib")
+        if platlib and platlib != purelib:
+            paths.append(str(Path(platlib).resolve()))
+        _STDLIB_PATHS = paths
+    return _STDLIB_PATHS
+
+
+def _resolve_stdlib_path(module: str) -> Optional[Path]:
+    """Resolve a module name to its source file via importlib.
+
+    Handles stdlib modules, installed packages, and anything on sys.path.
+    Returns None if the module has no source file (C extensions, builtins).
+    """
+    if not module:
+        return None
+
+    # Normalize relative imports — strip leading dots
+    clean = module.lstrip(".")
+    if not clean:
+        return None
+
+    try:
+        spec = importlib.util.find_spec(clean)
+    except (ModuleNotFoundError, ValueError):
+        return None
+
+    if spec is None or spec.origin is None:
+        return None
+
+    # Skip built-in/frozen modules (no file on disk)
+    if spec.origin in ("built-in", "frozen"):
+        return None
+
+    origin = Path(spec.origin)
+    if origin.is_file() and origin.suffix == ".py":
+        return origin
+
+    return None
+
+
+def _is_stdlib_path(resolved: Path) -> bool:
+    """Check if a resolved file path is inside stdlib or site-packages.
+
+    Used to prevent recursing into stdlib/third-party type definitions,
+    which would bloat the context with irrelevant types.
+    """
+    resolved_str = str(resolved.resolve())
+    for prefix in _get_stdlib_paths():
+        if resolved_str.startswith(prefix):
+            return True
+    return False
+
+
+def _filter_type_defs(type_defs: str, names: str) -> str:
+    """Filter type definition blocks to only those matching imported names.
+
+    Args:
+        type_defs: Concatenated class/interface definition blocks, separated by "\\n\\n".
+        names: Comma-separated string of imported names, e.g. "Hole, Expansion, Filler".
+               Empty string or "*" means keep all (no filtering).
+
+    Returns:
+        Filtered type definitions string, or empty string if nothing matches.
+    """
+    if not type_defs or not names or names.strip() == "*":
+        return type_defs  # No filtering — wildcard or plain import
+
+    # Parse imported names into a set
+    wanted = {n.strip() for n in names.split(",") if n.strip()}
+    if not wanted:
+        return type_defs
+
+    # Split into blocks and check if each block defines a wanted name.
+    # Type def blocks look like:
+    #   "class Hole:\n    line_no: int\n    ..."
+    #   "@dataclass\nclass Expansion:\n    ..."
+    #   "interface Props {\n    ..."
+    #   "type Alias = ..."
+    #   "enum Status { ... }"
+    # We extract the defined name from the first `class/interface/type/enum NAME` line.
+    name_pattern = re.compile(
+        r"^(?:export\s+)?(?:class|interface|type|enum|struct)\s+(\w+)",
+        re.MULTILINE,
+    )
+
+    blocks = type_defs.split("\n\n")
+    kept: list[str] = []
+
+    for block in blocks:
+        if not block.strip():
+            continue
+        match = name_pattern.search(block)
+        if match and match.group(1) in wanted:
+            kept.append(block)
+
+    return "\n\n".join(kept)
 
 
 # ─── Layer 1: Type Context ────────────────────────────────────────────────────
@@ -243,6 +364,8 @@ class TypeContextLayer:
         """Transitively resolve type definitions from imported modules.
 
         Follows import chains up to max_depth with cycle detection.
+        Filters type definitions to only those matching imported names.
+        Falls back to stdlib/site-packages via importlib for non-local imports.
         """
         if _visited is None:
             _visited = set()
@@ -259,30 +382,50 @@ class TypeContextLayer:
         imports = backend.extract_imports(source)
         all_type_defs: list[str] = []
 
-        for module, _names in imports:
-            # Resolve import to file path
+        for module, names in imports:
+            # Resolve import to file path — local files only
             resolved = backend.resolve_import_path(module, base_dir)
-            if resolved and resolved.is_file():
-                try:
-                    imported_source = resolved.read_text()
-                except (OSError, UnicodeDecodeError):
-                    continue
 
-                # Extract type definitions from the imported file
-                type_defs = backend.extract_type_definitions(imported_source)
-                if type_defs:
-                    all_type_defs.append(
-                        f"# From {resolved.name}:\n{type_defs}"
-                    )
+            # Fallback to importlib for non-local imports
+            if not resolved or not resolved.is_file():
+                resolved = _resolve_stdlib_path(module)
 
-                # Recurse into the imported file's imports
-                transitive = self._resolve_cross_file_types(
-                    imported_source, resolved, backend,
-                    max_depth=max_depth - 1,
-                    _visited=_visited,
+            if not resolved or not resolved.is_file():
+                continue
+
+            # Skip stdlib/site-packages — LLM already knows these types
+            if _is_stdlib_path(resolved):
+                continue
+
+            # Deduplicate: skip files we've already extracted types from
+            resolved_key = str(resolved.resolve())
+            if resolved_key in _visited:
+                continue
+            _visited.add(resolved_key)
+
+            try:
+                imported_source = resolved.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            # Extract type definitions from the imported file
+            type_defs = backend.extract_type_definitions(imported_source)
+            if type_defs and names:
+                # Filter to only the names actually imported
+                type_defs = _filter_type_defs(type_defs, names)
+            if type_defs:
+                all_type_defs.append(
+                    f"# From {resolved.name}:\n{type_defs}"
                 )
-                if transitive:
-                    all_type_defs.append(transitive)
+
+            # Recurse into the imported file's imports
+            transitive = self._resolve_cross_file_types(
+                imported_source, resolved, backend,
+                max_depth=max_depth - 1,
+                _visited=_visited,
+            )
+            if transitive:
+                all_type_defs.append(transitive)
 
         return "\n\n".join(all_type_defs)
 
