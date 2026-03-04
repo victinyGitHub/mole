@@ -7,7 +7,10 @@ Usage:
     mole --check myfile.py                  # Show holes
     mole --fill-all myfile.py               # Fill all unfilled holes
     mole --expand-all myfile.py             # Expand all unfilled holes
-    mole --model opus myfile.py              # Use opus model
+    mole --prefetch myfile.py               # Pre-warm cache with diversify results
+    mole --cache-status myfile.py           # Show cache status
+    mole --no-cache --fill-all myfile.py    # Bypass cache
+    mole --model opus myfile.py             # Use opus model
     mole --layers types,behavior f.py       # Selective context layers
 """
 from __future__ import annotations
@@ -22,7 +25,7 @@ from typing import Optional
 from .types import Hole, HoleStatus, MoleFile, FillerConfig
 from .operations import (
     discover, expand, diversify, fill, verify, apply, resync,
-    edit_hole, propagate, antiunify,
+    edit_hole, propagate, antiunify, prefetch,
 )
 from .fillers import get_filler, FILLER_NAMES
 from .context import (
@@ -31,6 +34,7 @@ from .context import (
     DEFAULT_LAYERS, assemble_context,
 )
 from .backends import get_backend, detect_language
+from .cache import CacheManager, get_cache, set_cache
 from .display import (
     show_holes, show_hole_detail, show_expansion, show_verify_result,
     print_welcome, get_prompt, print_code_panel, print_fill_result,
@@ -71,7 +75,7 @@ def _resolve_layers(layer_str: Optional[str]) -> list:
 _REPL_COMMANDS = [
     "show", "expand", "diversify", "fill", "context",
     "verify", "apply", "edit", "propagate", "groups",
-    "config", "undo", "reload", "quit", "exit",
+    "config", "cache", "prefetch", "undo", "reload", "quit", "exit",
 ]
 
 # Valid config keys and their types/validators
@@ -110,13 +114,19 @@ def _setup_readline() -> None:
     atexit.register(readline.write_history_file, str(history_file))
 
 
-def _repl(dfile: MoleFile, filler_name: str, layers: list, config: FillerConfig) -> None:
+def _repl(dfile: MoleFile, filler_name: str, layers: list, config: FillerConfig,
+          use_cache: bool = True) -> None:
     """Interactive REPL for hole-driven development."""
     _setup_readline()
     filler_obj = get_filler(filler_name, config)
     backend = get_backend(dfile.language)
     undo_stack: list[str] = [dfile.source]  # Source history for undo
     lang = dfile.language  # For syntax highlighting
+
+    # Initialize cache manager (or disable if --no-cache)
+    cache_mgr = get_cache() if use_cache else None
+    if not use_cache:
+        set_cache(None)
 
     print_welcome(dfile)
 
@@ -464,6 +474,59 @@ def _repl(dfile: MoleFile, filler_name: str, layers: list, config: FillerConfig)
                         except ValueError:
                             print_error(f"Invalid value for {key}: {val_str}")
 
+        elif cmd == "cache":
+            # Show cache status, or manage cache
+            if not cache_mgr:
+                print_info("Caching is disabled (--no-cache)")
+            elif arg in ("clear", "clean"):
+                count = cache_mgr.clear(dfile.path)
+                print_applied(f"Cleared {count} cached entries")
+            elif arg == "stale":
+                count = cache_mgr.clear_stale(dfile.path, dfile.source)
+                print_applied(f"Removed {count} stale entries")
+            elif arg == "stats":
+                stats = cache_mgr.stats
+                print_info(f"Session: {stats.summary()}")
+            else:
+                # Default: show status
+                status = cache_mgr.status(dfile.path, dfile.source)
+                print_info(f"Cache: {status.summary()}")
+                if cache_mgr.stats.total_lookups > 0:
+                    print_info(f"Session: {cache_mgr.stats.summary()}")
+                if HAS_RICH and console:
+                    from .display import COLORS
+                    from rich.text import Text
+                    hint = Text()
+                    hint.append("  ", style=COLORS["dim"])
+                    hint.append("cache clear", style=COLORS["primary"])
+                    hint.append(" · ", style=COLORS["muted"])
+                    hint.append("cache stale", style=COLORS["primary"])
+                    hint.append(" · ", style=COLORS["muted"])
+                    hint.append("cache stats", style=COLORS["primary"])
+                    console.print(hint)
+                else:
+                    print("  Subcommands: cache clear, cache stale, cache stats")
+
+        elif cmd == "prefetch":
+            # Pre-warm cache with diversify results for all unfilled holes
+            if not cache_mgr:
+                print_error("Caching is disabled — enable it first (no --no-cache)")
+            elif not dfile.unfilled:
+                print_info("No unfilled holes to prefetch")
+            else:
+                print_info(f"Prefetching {len(dfile.unfilled)} hole(s)...")
+                def _on_progress(i: int, total: int, h: Hole) -> None:
+                    desc = h.description[:50]
+                    print_info(f"  [{i+1}/{total}] L{h.line_no}: {desc}")
+                stats = prefetch(
+                    dfile, filler_obj, layers, backend, cache_mgr,
+                    on_progress=_on_progress,
+                )
+                print_applied(
+                    f"Prefetch done: {stats['generated']} generated, "
+                    f"{stats['cached']} already cached, {stats['failed']} failed"
+                )
+
         elif cmd == "reload":
             dfile = discover(dfile.path, backend)
             show_holes(dfile)
@@ -670,11 +733,27 @@ def main(argv: Optional[list[str]] = None) -> None:
         description="Human-centred assisted programming with typed holes",
     )
     parser.add_argument("file", type=Path, help="Source file to work on")
+
+    # Batch modes
     parser.add_argument("--check", action="store_true", help="Show holes (no LLM calls)")
     parser.add_argument("--fill-all", action="store_true", help="Fill all unfilled holes")
     parser.add_argument("--expand-all", action="store_true", help="Expand all unfilled holes")
     parser.add_argument("--propagate", action="store_true", help="Generate holes from type errors")
     parser.add_argument("--groups", action="store_true", help="Show anti-unified hole groups")
+
+    # Serve mode: background file watcher + HTTP API + diversify generation
+    parser.add_argument("--serve", action="store_true", help="Start serve mode (file watcher + HTTP API)")
+    parser.add_argument("--port", type=int, default=3077, help="Port for serve mode HTTP API (default: 3077)")
+
+    # Pick mode: interactive approach picker (connects to serve API)
+    parser.add_argument("--pick", action="store_true", help="Interactive approach picker (connects to serve)")
+    parser.add_argument("--poll", action="store_true", help="Wait for serve to become available")
+    parser.add_argument("--auto-apply", action="store_true", help="Auto-apply picked approaches to file")
+
+    # Prefetch: pre-warm cache with diversify results
+    parser.add_argument("--prefetch", action="store_true", help="Pre-warm cache by running diversify for all holes")
+
+    # Configuration
     parser.add_argument(
         "--filler", default="claude", choices=FILLER_NAMES,
         help="Filler to use (default: claude)",
@@ -683,6 +762,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("--language", default=None, help="Override language detection")
     parser.add_argument("--model", default=None, help="Override model for filler")
     parser.add_argument("--effort", default="medium", help="Effort level for Claude CLI")
+    parser.add_argument("--no-cache", action="store_true", help="Bypass caching")
 
     args = parser.parse_args(argv)
 
@@ -709,6 +789,39 @@ def main(argv: Optional[list[str]] = None) -> None:
         _batch_propagate(args.file)
     elif args.groups:
         _batch_groups(args.file)
+    elif args.serve:
+        from .server import serve
+        from .cache import CacheManager, set_cache
+        filler_obj = get_filler(args.filler, config)
+        if not args.no_cache:
+            set_cache(CacheManager())
+        serve(path=args.file, filler=filler_obj, port=args.port)
+    elif args.pick:
+        from .picker import pick_command
+        pick_command(
+            path=args.file,
+            port=args.port,
+            poll=args.poll,
+        )
+    elif args.prefetch:
+        from .operations import prefetch as prefetch_op
+        dfile = discover(args.file)
+        filler_obj = get_filler(args.filler, config)
+        backend = get_backend(dfile.language)
+        cache_mgr = None
+        if not args.no_cache:
+            from .cache import CacheManager, set_cache
+            cache_mgr = CacheManager()
+            set_cache(cache_mgr)
+        with spinner(f"Pre-warming cache for {len(dfile.unfilled)} hole(s)..."):
+            stats = prefetch_op(
+                dfile, filler_obj, layers, backend,
+                cache=cache_mgr,
+            )
+        print_applied(
+            f"Prefetch done: {stats.get('generated', 0)} generated, "
+            f"{stats.get('cached', 0)} cached, {stats.get('failed', 0)} failed"
+        )
     else:
         # Interactive REPL
         dfile = discover(args.file)

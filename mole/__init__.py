@@ -15,10 +15,11 @@ from .types import (
     Hole, HoleStatus, BehaviorSpec, Expansion,
     FillerConfig, Filler, VerifyResult, MoleFile,
 )
-from .operations import discover, expand, diversify, fill, verify, apply
+from .operations import discover, expand, diversify, fill, verify, apply, prefetch
 from .backends import get_backend, detect_language, LanguageBackend
 from .fillers import get_filler, FILLER_NAMES
 from .context import assemble_context, DEFAULT_LAYERS
+from .cache import CacheManager, get_cache, set_cache
 
 
 # ─── User-facing API ─────────────────────────────────────────────────────────
@@ -46,7 +47,9 @@ __all__ = [
     "Hole", "HoleStatus", "BehaviorSpec", "Expansion",
     "FillerConfig", "Filler", "VerifyResult", "MoleFile",
     # Operations
-    "discover", "expand", "diversify", "fill", "verify", "apply",
+    "discover", "expand", "diversify", "fill", "verify", "apply", "prefetch",
+    # Cache
+    "CacheManager", "get_cache", "set_cache",
     # Backends
     "get_backend", "detect_language", "LanguageBackend",
     # Fillers

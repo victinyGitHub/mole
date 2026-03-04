@@ -39,6 +39,10 @@ from .prompts import (
     FILL_PROMPT_TEMPLATE, EXPAND_PROMPT_TEMPLATE,
     DIVERSIFY_PROMPT_TEMPLATE, fill_mode_hint,
 )
+from .cache import (
+    CacheManager, cache_key, context_hash, source_hash,
+    get_cache, _serialize_expansion, _deserialize_expansion,
+)
 
 
 # ─── discover ─────────────────────────────────────────────────────────────────
@@ -94,11 +98,16 @@ def expand(
     backend: Optional[LanguageBackend] = None,
     idea_hint: Optional[str] = None,
     on_chunk: Optional[callable] = None,
+    cache: Optional[CacheManager] = None,
+    use_cache: bool = True,
 ) -> Expansion:
     """Decompose one hole into real code with typed sub-holes.
 
     The result is readable code with smaller, more constrained holes.
     NOT closures. NOT pseudocode. Real, inline code that shares parent scope.
+
+    Cache-aware: checks cache before calling LLM, stores result on miss.
+    Pass use_cache=False or cache=None to bypass caching.
     """
     if context_layers is None:
         context_layers = DEFAULT_LAYERS
@@ -113,6 +122,27 @@ def expand(
 
     # Assemble context for this hole (uses hole_target.line_no for scope/enclosing block)
     context = assemble_context(hole_target, source, path, context_layers, backend)
+
+    # Resolve cache manager — use provided, fall back to module-level, or None
+    _cache = cache if cache is not None else (get_cache() if use_cache else None)
+
+    # Check cache for existing expansion
+    model_name = getattr(filler, 'config', None)
+    model_name = model_name.model if model_name else "sonnet"
+    ctx_hash = context_hash(context)
+
+    if _cache and use_cache:
+        key = cache_key(hole_target, "expand", model_name, ctx_hash, idea_hint or "")
+        cached = _cache.get_expand(key, path, source)
+        if cached is not None:
+            # Re-discover sub-holes in the cached expanded code
+            cached.sub_holes = backend.find_holes(cached.expanded_code)
+            parsed = parse_mole_comments(cached.expanded_code, comment_prefix, language)
+            cached.sub_holes = attach_specs_to_holes(cached.sub_holes, parsed)
+            hole_target.status = HoleStatus.EXPANDED
+            return cached
+    else:
+        key = ""
 
     # Build expand prompt — hint goes right after task description for maximum salience
     hint_text = f"\nMANDATORY APPROACH: You MUST use this specific approach — {idea_hint}\nDo NOT default to the obvious/simple solution. Implement EXACTLY this approach." if idea_hint else ""
@@ -153,12 +183,18 @@ def expand(
     # Mark parent as expanded
     hole_target.status = HoleStatus.EXPANDED
 
-    return Expansion(
+    result = Expansion(
         approach_name=approach_name,
         approach_description=approach_desc or idea_hint or "",
         expanded_code=raw_expansion,
         sub_holes=sub_holes,
     )
+
+    # Store result in cache
+    if _cache and use_cache and key:
+        _cache.store_expand(key, hole_target, result, path, source, model_name)
+
+    return result
 
 
 # ─── diversify ───────────────────────────────────────────────────────────────
@@ -173,6 +209,8 @@ def diversify(
     n: int = 3,
     on_chunk: Optional[callable] = None,
     on_title: Optional[callable] = None,
+    cache: Optional[CacheManager] = None,
+    use_cache: bool = True,
 ) -> list[Expansion]:
     """Generate N different expansion approaches for the human to choose from.
 
@@ -182,11 +220,36 @@ def diversify(
 
     on_chunk(idx, text): called with streaming deltas for approach idx
     on_title(idx, name): called when approach name is known for idx
+
+    Cache-aware: caches the complete diversify result (all N expansions).
     """
     if context_layers is None:
         context_layers = DEFAULT_LAYERS
     if backend is None:
         backend = get_backend(detect_language(path))
+
+    # Resolve cache manager
+    _cache = cache if cache is not None else (get_cache() if use_cache else None)
+    model_name = getattr(filler, 'config', None)
+    model_name = model_name.model if model_name else "sonnet"
+
+    # Check cache for existing diversify results
+    if _cache and use_cache:
+        ctx = assemble_context(hole_target, source, path, context_layers, backend)
+        ctx_hash = context_hash(ctx)
+        div_key = cache_key(hole_target, "diversify", model_name, ctx_hash)
+        cached = _cache.get_diversify(div_key, path, source)
+        if cached is not None:
+            # Re-discover sub-holes in cached expansions
+            language = backend.language
+            cp = comment_prefix_for_language(language)
+            for exp in cached:
+                exp.sub_holes = backend.find_holes(exp.expanded_code)
+                parsed = parse_mole_comments(exp.expanded_code, cp, language)
+                exp.sub_holes = attach_specs_to_holes(exp.sub_holes, parsed)
+            return cached
+    else:
+        div_key = ""
 
     # Build behavioral constraint for idea generation
     behavior_text = ""
@@ -214,6 +277,7 @@ def diversify(
     ideas = _parse_ideas(raw_ideas, n)
 
     # Step 2: Expand all approaches in parallel
+    # Individual expand calls also check their own cache (per-approach)
     def _expand_one(idea: tuple[str, str], idx: int) -> Expansion:
         name, desc = idea
         if on_title:
@@ -225,6 +289,8 @@ def diversify(
             context_layers, backend,
             idea_hint=desc,
             on_chunk=chunk_cb,
+            cache=_cache,
+            use_cache=use_cache,
         )
         exp.approach_name = name
         exp.approach_description = desc
@@ -236,6 +302,10 @@ def diversify(
         for future in as_completed(futures):
             idx = futures[future]
             expansions[idx] = future.result()
+
+    # Store complete diversify result in cache
+    if _cache and use_cache and div_key:
+        _cache.store_diversify(div_key, hole_target, expansions, path, source, model_name)
 
     return expansions
 
@@ -282,6 +352,8 @@ def fill(
     max_retries: int = 3,
     extra_imports: Optional[list[str]] = None,
     on_chunk: Optional[callable] = None,
+    cache: Optional[CacheManager] = None,
+    use_cache: bool = True,
 ) -> tuple[str, VerifyResult]:
     """Fill a single hole with LLM-generated code.
 
@@ -290,6 +362,9 @@ def fill(
 
     extra_imports: imports from other fills in a batch (deferred hoisting).
     These are included in verify so their absence doesn't cause false errors.
+
+    Cache-aware: checks cache before calling LLM, stores successful fills.
+    Only successful (type-checked) fills are cached.
 
     Returns: (filled_code, verify_result)
     """
@@ -304,6 +379,24 @@ def fill(
 
     # Assemble context (uses hole_target.line_no for scope vars, enclosing block)
     context = assemble_context(hole_target, source, path, context_layers, backend)
+
+    # Check cache for existing fill result
+    _cache = cache if cache is not None else (get_cache() if use_cache else None)
+    model_name = getattr(filler, 'config', None)
+    model_name = model_name.model if model_name else "sonnet"
+    ctx_hash = context_hash(context)
+
+    if _cache and use_cache:
+        fill_key = cache_key(hole_target, "fill", model_name, ctx_hash)
+        cached = _cache.get_fill(fill_key, path, source)
+        if cached is not None:
+            cached_code, cached_result = cached
+            hole_target.fill_code = cached_code
+            hole_target.status = HoleStatus.FILLED
+            hole_target.filled_by = f"cache@{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+            return cached_code, cached_result
+    else:
+        fill_key = ""
 
     # Type and behavior constraints for the prompt
     type_text = ""
@@ -380,10 +473,66 @@ def fill(
     hole_target.status = HoleStatus.FILLED if best_result.success else HoleStatus.UNFILLED
     hole_target.filled_by = f"fill@{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
 
+    # Cache successful fills
+    if _cache and use_cache and fill_key and best_result.success:
+        _cache.store_fill(fill_key, hole_target, best_code, best_result, path, source, model_name)
+
     return best_code, best_result
 
 
 # ─── verify ──────────────────────────────────────────────────────────────────
+
+# ─── prefetch ─────────────────────────────────────────────────────────────────
+
+def prefetch(
+    mole_file: MoleFile,
+    filler: Filler,
+    context_layers: Optional[list] = None,
+    backend: Optional[LanguageBackend] = None,
+    cache: Optional[CacheManager] = None,
+    on_progress: Optional[callable] = None,
+) -> dict:
+    """Pre-warm the cache by generating diversify results for all unfilled holes.
+
+    Runs diversify() for each unfilled hole and stores results in cache.
+    Subsequent diversify/expand calls will hit cache instead of calling LLM.
+
+    on_progress(hole_idx, total, hole): called after each hole is processed.
+
+    Returns: dict with stats:
+      {"total": N, "cached": M, "generated": K, "failed": F}
+    """
+    if context_layers is None:
+        context_layers = DEFAULT_LAYERS
+    if backend is None:
+        backend = get_backend(mole_file.language)
+    if cache is None:
+        cache = get_cache()
+
+    unfilled = mole_file.unfilled
+    stats = {"total": len(unfilled), "cached": 0, "generated": 0, "failed": 0}
+
+    for i, hole in enumerate(unfilled):
+        if on_progress:
+            on_progress(i, len(unfilled), hole)
+        try:
+            # diversify() will check cache internally — if already cached, it's instant
+            expansions = diversify(
+                hole, mole_file.source, mole_file.path, filler,
+                context_layers, backend,
+                cache=cache,
+                use_cache=True,
+            )
+            # Check if this was a cache hit by looking at stats
+            if cache.stats.hits > 0:
+                stats["cached"] += 1
+            else:
+                stats["generated"] += 1
+        except Exception as e:
+            stats["failed"] += 1
+
+    return stats
+
 
 def verify(
     hole_target: Hole,

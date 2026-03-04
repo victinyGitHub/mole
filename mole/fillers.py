@@ -13,6 +13,7 @@ import json
 import os
 import re
 import select
+import signal
 import subprocess
 import threading
 import time
@@ -24,7 +25,7 @@ from .types import FillerConfig, Filler
 
 # ─── Concurrency Control ────────────────────────────────────────────────────
 
-MAX_CONCURRENT_PROCS = 6
+MAX_CONCURRENT_PROCS = 3
 _proc_semaphore = threading.Semaphore(MAX_CONCURRENT_PROCS)
 
 
@@ -166,13 +167,23 @@ class ClaudeCLIFiller:
             except StopIteration as e:
                 final_code = e.value  # complete result
         """
-        cmd = [
-            self.CLAUDE_BIN, "-p", prompt,
-            "--model", self.config.model,
-            "--output-format", "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-        ]
+        use_stdin = len(prompt.encode("utf-8")) > 100_000
+        if use_stdin:
+            cmd = [
+                self.CLAUDE_BIN, "-p", "-",
+                "--model", self.config.model,
+                "--output-format", "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+            ]
+        else:
+            cmd = [
+                self.CLAUDE_BIN, "-p", prompt,
+                "--model", self.config.model,
+                "--output-format", "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+            ]
         if "no-session-persistence" in self._supported_flags:
             cmd.append("--no-session-persistence")
         if self.config.effort != "default" and "effort" in self._supported_flags:
@@ -187,8 +198,11 @@ class ClaudeCLIFiller:
                 env=self.CLEAN_ENV,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE if use_stdin else subprocess.DEVNULL,
             )
+            if use_stdin:
+                proc.stdin.write(prompt.encode("utf-8"))
+                proc.stdin.close()
             start = time.monotonic()
             try:
                 while True:
@@ -313,12 +327,24 @@ class ClaudeCLIFiller:
         return [results.get(i, f"# ERROR: fill {i} missing") for i in range(len(prompts))]
 
     def _call_claude(self, prompt: str) -> str:
-        """Call Claude CLI with clean env. Returns raw stdout."""
-        cmd = [
-            self.CLAUDE_BIN, "-p", prompt,
-            "--model", self.config.model,
-            "--output-format", "text",
-        ]
+        """Call Claude CLI with clean env. Returns raw stdout.
+
+        For large prompts (>100KB), pipes via stdin instead of -p arg
+        to avoid OS 'Argument list too long' errors.
+        """
+        use_stdin = len(prompt.encode("utf-8")) > 100_000
+        if use_stdin:
+            cmd = [
+                self.CLAUDE_BIN, "-p", "-",
+                "--model", self.config.model,
+                "--output-format", "text",
+            ]
+        else:
+            cmd = [
+                self.CLAUDE_BIN, "-p", prompt,
+                "--model", self.config.model,
+                "--output-format", "text",
+            ]
         if "no-session-persistence" in self._supported_flags:
             cmd.append("--no-session-persistence")
         if self.config.effort != "default" and "effort" in self._supported_flags:
@@ -331,10 +357,14 @@ class ClaudeCLIFiller:
                 env=self.CLEAN_ENV,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE if use_stdin else subprocess.DEVNULL,
+                start_new_session=True,  # own process group for clean kill
             )
             try:
-                stdout, stderr = proc.communicate(timeout=self.config.timeout)
+                stdin_data = prompt.encode("utf-8") if use_stdin else None
+                stdout, stderr = proc.communicate(
+                    input=stdin_data, timeout=self.config.timeout,
+                )
                 if proc.returncode != 0:
                     err_text = stderr.decode("utf-8", errors="replace")[:300]
                     raise RuntimeError(f"Claude CLI failed (exit {proc.returncode}): {err_text}")
@@ -343,7 +373,11 @@ class ClaudeCLIFiller:
                     raise RuntimeError("Claude CLI returned empty output")
                 return result
             except subprocess.TimeoutExpired:
-                proc.kill()
+                # Kill entire process group (claude + any children)
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    proc.kill()
                 proc.communicate()
                 raise TimeoutError(f"Claude CLI timed out after {self.config.timeout}s")
         finally:
