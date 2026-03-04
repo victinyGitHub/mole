@@ -188,11 +188,25 @@ def diversify(
     if backend is None:
         backend = get_backend(detect_language(path))
 
+    # Build behavioral constraint for idea generation
+    behavior_text = ""
+    spec = hole_target.behavior
+    if spec.behavior or spec.requires or spec.ensures:
+        parts = []
+        if spec.behavior:
+            parts.append(f"BEHAVIOR: {spec.behavior}")
+        if spec.requires:
+            parts.append(f"REQUIRES: {spec.requires}")
+        if spec.ensures:
+            parts.append(f"ENSURES: {spec.ensures}")
+        behavior_text = "\n".join(parts)
+
     # Step 1: Generate approach ideas
     idea_prompt = DIVERSIFY_PROMPT_TEMPLATE.format(
         n=n,
         description=hole_target.description,
         expected_type=hole_target.expected_type or "unknown",
+        behavior_constraint=behavior_text,
     )
     raw_ideas = filler.fill(idea_prompt)
 

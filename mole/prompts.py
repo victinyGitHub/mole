@@ -120,6 +120,7 @@ Propose {{n}} structurally different approaches to implement this task.
 
 TASK: {{description}}
 Type: {{expected_type}}
+{{behavior_constraint}}
 
 {DIVERSIFY_FORMAT}
 """
