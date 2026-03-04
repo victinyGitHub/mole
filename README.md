@@ -49,14 +49,16 @@ mole search.py
 
 | Command | What it does |
 |---------|-------------|
-| `show 1` | See hole details and context |
-| `fill 1` | Generate code for hole 1 (type-checked automatically) |
-| `expand 1` | Break a big hole into smaller sub-holes |
-| `diversify 1` | See 3 different approaches side-by-side |
-| `edit 1` | Change the hole description |
+| `show <hole>` | See hole details and context |
+| `fill <hole>` | Generate code for that hole (type-checked automatically) |
+| `expand <hole>` | Break a big hole into smaller sub-holes |
+| `diversify <hole>` | See 3 different approaches side-by-side |
+| `edit <hole>` | Change the hole description |
 | `apply` | Write all generated code back to your file |
 | `undo` | Revert last fill/expand |
 | `config model opus` | Switch to a different Claude model |
+
+`<hole>` is the hole number shown in the REPL (e.g. `fill 1` fills hole 1).
 
 That's the core loop: **write holes → fill/expand → review → apply**.
 
