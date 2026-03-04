@@ -30,13 +30,19 @@ You should see 2 holes detected with their types.
 
 ### Claude Code plugin
 
-If you use [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview), install mole as a plugin to teach Claude how to use it:
+If you use [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview), install mole as a plugin so Claude knows how to use it:
 
-```bash
-claude plugin add github:victinyGitHub/mole
+```
+/plugin marketplace add victinyGitHub/claude-plugins
+/plugin install mole@xi-plugins
 ```
 
-Then run `/mole:setup` to install the CLI, or `/mole:mole` for usage reference.
+Then run `/mole:setup` to install the CLI, or `/mole:mole` for full usage reference.
+
+> **PATH not working?** If `mole` isn't found after install, add pip's bin to your PATH:
+> ```bash
+> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+> ```
 
 ## How it works
 
