@@ -5,6 +5,7 @@ NO python ast module. Tree-sitter is the only AST engine.
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import tempfile
@@ -72,6 +73,59 @@ def _find_child_by_type(node, child_type: str):
 def _find_child_by_field(node, field_name: str):
     """Find child node by field name."""
     return node.child_by_field_name(field_name)
+
+
+def _read_tsconfig_options(dir_path: Path) -> dict:
+    """Read compilerOptions from tsconfig.json if present.
+
+    Returns a dict with 'lib', 'target', 'strict' keys (only those found).
+    Falls back to sensible defaults if no tsconfig exists.
+    """
+    tsconfig = dir_path / "tsconfig.json"
+    if not tsconfig.is_file():
+        return {}
+    try:
+        raw = tsconfig.read_text()
+        # Strip single-line comments (tsc allows them in tsconfig)
+        raw = re.sub(r'//.*$', '', raw, flags=re.MULTILINE)
+        config = json.loads(raw)
+        opts = config.get("compilerOptions", {})
+        result: dict = {}
+        if "lib" in opts:
+            result["lib"] = opts["lib"]  # list of strings
+        if "target" in opts:
+            result["target"] = opts["target"]
+        if "strict" in opts:
+            result["strict"] = opts["strict"]
+        if "moduleResolution" in opts:
+            result["moduleResolution"] = opts["moduleResolution"]
+        return result
+    except (json.JSONDecodeError, KeyError):
+        return {}
+
+
+def _build_tsc_flags(path: Path) -> list[str]:
+    """Build tsc flags from project tsconfig or sensible defaults."""
+    opts = _read_tsconfig_options(path.parent)
+    flags: list[str] = ["tsc", "--noEmit"]
+
+    if opts.get("strict", True):
+        flags.append("--strict")
+
+    lib = opts.get("lib")
+    if lib:
+        # tsconfig lib is a list like ["ES2020", "DOM"]
+        flags.extend(["--lib", ",".join(lib)])
+    else:
+        flags.extend(["--lib", "es2020,dom"])
+
+    target = opts.get("target")
+    if target:
+        flags.extend(["--target", target])
+    else:
+        flags.extend(["--target", "es2020"])
+
+    return flags
 
 
 # ─── TypeScript Backend ──────────────────────────────────────────────────────
@@ -250,11 +304,10 @@ class TypeScriptBackend:
             tmp_path = Path(tmp.name)
 
         try:
+            cmd = _build_tsc_flags(path)
+            cmd.append(str(tmp_path))
             result = subprocess.run(
-                ["tsc", "--noEmit", "--strict",
-                 "--lib", "es2015,dom", "--target", "es2015",
-                 str(tmp_path)],
-                capture_output=True, text=True, timeout=30,
+                cmd, capture_output=True, text=True, timeout=30,
             )
             if result.stdout:
                 self._apply_tsc_types(holes, result.stdout, line_offset, tmp_path.name)
@@ -303,11 +356,10 @@ class TypeScriptBackend:
             tmp_path = Path(tmp.name)
 
         try:
+            cmd = _build_tsc_flags(path)
+            cmd.append(str(tmp_path))
             result = subprocess.run(
-                ["tsc", "--noEmit", "--strict",
-                 "--lib", "es2015,dom", "--target", "es2015",
-                 str(tmp_path)],
-                capture_output=True, text=True, timeout=30,
+                cmd, capture_output=True, text=True, timeout=30,
             )
             errors: list[str] = []
             if result.stdout:
