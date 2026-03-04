@@ -93,10 +93,14 @@ class ClaudeCLIFiller:
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "LANG": os.environ.get("LANG", "en_US.UTF-8"),
         }
-        self._supports_no_session = self._check_flag_support()
+        self._supported_flags = self._detect_cli_flags()
 
-    def _check_flag_support(self) -> bool:
-        """Check if claude CLI supports --no-session-persistence."""
+    def _detect_cli_flags(self) -> set[str]:
+        """Detect which optional flags the installed Claude CLI supports.
+
+        Checks --help output for flags we use. Returns a set of supported
+        flag names (without the -- prefix).
+        """
         try:
             proc = subprocess.run(
                 [self.CLAUDE_BIN, "--help"],
@@ -105,9 +109,28 @@ class ClaudeCLIFiller:
                 stdin=subprocess.DEVNULL,
                 timeout=10,
             )
-            return "--no-session-persistence" in proc.stdout
+            help_text = proc.stdout
         except Exception:
-            return False
+            return set()
+
+        optional_flags = ["no-session-persistence", "effort"]
+        supported = set()
+        for flag in optional_flags:
+            if f"--{flag}" in help_text:
+                supported.add(flag)
+
+        # Warn if key flags are missing — likely an old CLI version
+        missing = [f for f in optional_flags if f not in supported]
+        if missing:
+            import sys
+            names = ", ".join(f"--{f}" for f in missing)
+            print(
+                f"⚠ Claude CLI is missing: {names}. "
+                f"Update with: claude update",
+                file=sys.stderr,
+            )
+
+        return supported
 
     def fill(self, prompt: str, on_chunk: Optional[callable] = None) -> str:
         """Send prompt to Claude CLI, return cleaned code output.
@@ -150,9 +173,9 @@ class ClaudeCLIFiller:
             "--verbose",
             "--include-partial-messages",
         ]
-        if self._supports_no_session:
+        if "no-session-persistence" in self._supported_flags:
             cmd.append("--no-session-persistence")
-        if self.config.effort != "default":
+        if self.config.effort != "default" and "effort" in self._supported_flags:
             cmd.extend(["--effort", self.config.effort])
 
         _proc_semaphore.acquire()
@@ -296,9 +319,9 @@ class ClaudeCLIFiller:
             "--model", self.config.model,
             "--output-format", "text",
         ]
-        if self._supports_no_session:
+        if "no-session-persistence" in self._supported_flags:
             cmd.append("--no-session-persistence")
-        if self.config.effort != "default":
+        if self.config.effort != "default" and "effort" in self._supported_flags:
             cmd.extend(["--effort", self.config.effort])
 
         _proc_semaphore.acquire()
