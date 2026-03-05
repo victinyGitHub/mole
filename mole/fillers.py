@@ -431,26 +431,140 @@ class ManualFiller:
         return [self.fill(p) for p in prompts]
 
 
+# ─── APIFiller ──────────────────────────────────────────────────────────────
+
+class APIFiller:
+    """HTTP API filler for OpenAI-compatible endpoints (Groq, Cerebras, etc.)."""
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://api.openai.com/v1",
+        model: str = "gpt-4o",
+        config: Optional[FillerConfig] = None,
+    ):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.config = config or FillerConfig()
+
+    def fill(self, prompt: str) -> str:
+        """Send prompt via HTTP API, return cleaned code."""
+        import urllib.request
+        import urllib.error
+
+        url = f"{self.base_url}/chat/completions"
+        payload = json.dumps({
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "mole/1.0",
+            },
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=self.config.timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                raw = data["choices"][0]["message"]["content"]
+                return _strip_fences(raw)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")[:200] if e.fp else ""
+            raise RuntimeError(f"API HTTP {e.code}: {e.reason} — {body}")
+        except (urllib.error.URLError, KeyError, json.JSONDecodeError) as e:
+            raise RuntimeError(f"API request failed: {e}")
+
+    def batch_fill(self, prompts: list[str]) -> list[str]:
+        """Fill multiple prompts sequentially."""
+        return [self.fill(p) for p in prompts]
+
+
 # ─── Filler Registry ─────────────────────────────────────────────────────────
 
 def get_filler(
     name: str,
     config: Optional[FillerConfig] = None,
-) -> ClaudeCLIFiller | ManualFiller:
+) -> ClaudeCLIFiller | APIFiller | ManualFiller:
     """Create a filler by name.
 
-    Available: claude (default), claude-opus, manual
+    Available: claude, claude-opus, groq, cerebras, deepseek, gemini,
+               fireworks, smart, manual
     """
     if name == "claude":
         return ClaudeCLIFiller(config or FillerConfig(model="sonnet"))
     elif name == "claude-opus":
         return ClaudeCLIFiller(config or FillerConfig(model="opus"))
+    elif name == "groq":
+        key = os.environ.get("GROQ_API_KEY", "")
+        if not key:
+            raise ValueError("GROQ_API_KEY not set")
+        return APIFiller(
+            api_key=key,
+            base_url="https://api.groq.com/openai/v1",
+            model="llama-3.3-70b-versatile",
+            config=config,
+        )
+    elif name == "cerebras":
+        key = os.environ.get("CEREBRAS_API_KEY", "")
+        if not key:
+            raise ValueError("CEREBRAS_API_KEY not set")
+        return APIFiller(
+            api_key=key,
+            base_url="https://api.cerebras.ai/v1",
+            model="llama3.1-8b",
+            config=config,
+        )
+    elif name == "deepseek":
+        key = os.environ.get("DEEPSEEK_API_KEY", "")
+        if not key:
+            raise ValueError("DEEPSEEK_API_KEY not set")
+        return APIFiller(
+            api_key=key,
+            base_url="https://api.deepseek.com/v1",
+            model="deepseek-chat",
+            config=config,
+        )
+    elif name == "gemini":
+        key = os.environ.get("GEMINI_API_KEY", "")
+        if not key:
+            raise ValueError("GEMINI_API_KEY not set")
+        return APIFiller(
+            api_key=key,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+            model="gemini-2.0-flash",
+            config=config,
+        )
+    elif name == "fireworks":
+        key = os.environ.get("FIREWORKS_API_KEY", "")
+        if not key:
+            raise ValueError("FIREWORKS_API_KEY not set")
+        return APIFiller(
+            api_key=key,
+            base_url="https://api.fireworks.ai/inference/v1",
+            model="accounts/fireworks/models/llama-v3p1-70b-instruct",
+            config=config,
+        )
+    elif name == "smart":
+        # Lazy import to avoid circular dependency
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'v2'))
+        from v2.smart_filler import get_smart_filler
+        return get_smart_filler(config)
     elif name == "manual":
         return ManualFiller(config)
     else:
-        available = "claude, claude-opus, manual"
-        raise ValueError(f"Unknown filler: {name!r}. Available: {available}")
+        raise ValueError(f"Unknown filler: {name!r}. Available: {', '.join(FILLER_NAMES)}")
 
 
 # Convenience names for the registry
-FILLER_NAMES = ["claude", "claude-opus", "manual"]
+FILLER_NAMES = [
+    "claude", "claude-opus", "groq", "cerebras", "deepseek",
+    "gemini", "fireworks", "smart", "manual",
+]
